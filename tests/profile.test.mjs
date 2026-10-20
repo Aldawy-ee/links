@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createHandler} from '../netlify/functions/profile.mjs';
+import {randomBytes} from 'node:crypto';
+process.env.ADMIN_PASSWORD=randomBytes(32).toString('hex');
+let stored=null;
+const handler=createHandler(()=>({get:async()=>stored,setJSON:async(_,p)=>{stored=p}}));
+const call=(path='',method='GET',body,cookie='')=>handler(new Request('https://example.test/api/'+path,{method,headers:{origin:'https://example.test',cookie,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}));
+const profile={name:'أحمد',bio:'أهلًا',location:'القاهرة',color:'#d9f279',image:'',links:[{title:'موقعي',subtitle:'',icon:'↗',url:'https://example.com'}]};
+test('authenticated publishing, public retrieval and unsafe input rejection',async()=>{
+ assert.equal((await call('','PUT',profile)).status,401);
+ assert.equal((await call('login','POST',{password:'incorrect'})).status,401);
+ const login=await call('login','POST',{password:process.env.ADMIN_PASSWORD});assert.equal(login.status,200);
+ const cookie=login.headers.get('set-cookie').split(';')[0];assert.match(login.headers.get('set-cookie'),/HttpOnly; Secure; SameSite=Strict/);
+ assert.equal((await (await call('session','GET',undefined,cookie)).json()).authenticated,true);
+ assert.equal((await call('','PUT',profile,cookie)).status,200);
+ assert.deepEqual((await (await call()).json()).profile,profile);
+ const malicious=structuredClone(profile);malicious.links[0].url='javascript:alert(1)';assert.equal((await call('','PUT',malicious,cookie)).status,400);
+ assert.equal((await call('','PUT',profile,cookie+'tampered')).status,401);
+ const cross=await handler(new Request('https://example.test/api/',{method:'PUT',headers:{origin:'https://evil.test',cookie},body:JSON.stringify(profile)}));assert.equal(cross.status,403);
+ const logout=await call('logout','POST',undefined,cookie);assert.match(logout.headers.get('set-cookie'),/Max-Age=0/);
+});
